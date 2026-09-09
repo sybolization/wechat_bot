@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>招聘问答</title>
+  <!-- 本地 vendored markdown 渲染器（项目硬约束：不走 CDN） -->
+  <script src="./marked.min.js"></script>
+  <!-- 微信云托管 H5 callContainer 三件套（官方 CDN，地址不可改动） -->
+  <script src="https://res.wx.qq.com/open/js/jweixin-1.6.0.js"></script>
+  <script src="https://web-9gikcbug35bad3a8-1304825656.tcloudbaseapp.com/sdk/1.3.0/cloud.js"></script>
+  <script src="https://web-9gikcbug35bad3a8-1304825656.tcloudbaseapp.com/sdk/1.3.1/mplogin.min.js"></script>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!-- 顶栏：标题 + 新对话（纯文字按钮） -->
+  <header class="topbar">
+    <span id="title" class="topbar-title">招聘问答</span>
+    <button id="btnNew" class="btn-new" type="button">新对话</button>
+  </header>
+
+  <!-- 消息流：欢迎区 + 消息（消息由 JS 直接 append 到 #feed） -->
+  <main id="feed">
+    <section id="welcome" class="welcome">
+      <p id="welcomeText" class="welcome-text">你好，我是招聘 AI 助手，欢迎提问。</p>
+      <div id="sugCard" class="sug-card"></div>
+    </section>
+  </main>
+
+  <!-- 底部输入区：输入条 + 发送按钮 + 免责声明 -->
+  <div class="composer-zone">
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="请输入您的问题"></textarea>
+      <button id="btnSend" class="btn-send" type="button" disabled>发送</button>
+    </div>
+    <p id="disclaimer" class="disclaimer">内容由 AI 生成，仅供参考</p>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

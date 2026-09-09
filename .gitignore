@@ -1,0 +1,23 @@
+# 环境与密钥
+.env
+cloudrun/.env
+.env.*
+!.env.example
+
+# 依赖与构建产物
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# 公司业务文档与知识库（不入公开仓库）
+docs/
+cloudrun/docs/**/*.xlsx
+cloudrun/docs/**/*.md
+
+# 打包产物（含知识库内容）
+*.zip
+
+# 内部架构文档与 IDE 工作区
+archecture.md
+.trae/
