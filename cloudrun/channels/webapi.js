@@ -1,12 +1,13 @@
 /**
  * H5 问答页 API 渠道（/api/config、/api/ask、/api/reset）。
  * 前端经微信 callContainer 内网调用，同步 JSON 返回（非流式），单次处理控制在 15 秒内。
+ * 双模式：AGENT_MODE=on 时 /api/ask 走 agent；默认停用，固定返回停用提示。
  * 复用 core 模块：runAgent / session / guard / qa-log；身份解析用顶层 identity.js。
  */
 
 const { runAgent } = require("../core/agent");
 const { appendHistory, clearSession } = require("../core/session");
-const { rateLimit } = require("../core/guard");
+const { rateLimit, AGENT_ENABLED } = require("../core/guard");
 const { qaLog } = require("../core/qa-log");
 const { identify } = require("../identity");
 
@@ -85,7 +86,9 @@ async function handleAsk(req, res, raw) {
   }
 }
 
-/** 工厂：返回挂载到 server.js 的渠道处理器（req, res, rawBody）。 */
+/**
+ * 工厂：返回挂载到 server.js 的渠道处理器（req, res, rawBody）。
+ */
 function createWebApi() {
   // /api/config 配置（envload 已先行加载 .env，文案随知识库打包切换）
   const config = {
@@ -104,7 +107,18 @@ function createWebApi() {
   return function handleWebApi(req, res, raw) {
     const path = (req.url || "").split("?")[0];
     if (req.method === "GET" && path === "/api/config") return json(res, 200, config);
-    if (req.method === "POST" && path === "/api/ask") return handleAsk(req, res, raw);
+    if (req.method === "POST" && path === "/api/ask") {
+      // 停用模式：固定返回停用提示（前端会渲染 error.message），不调用 agent
+      if (!AGENT_ENABLED) {
+        return json(res, 503, {
+          error: {
+            code: "disabled",
+            message: "智能问答已停用。如需人工咨询，请致电：0756-8687897（校招&专业人才招聘）、0756-8687266（生产运营岗位招聘）。",
+          },
+        });
+      }
+      return handleAsk(req, res, raw);
+    }
     if (req.method === "POST" && path === "/api/reset") {
       const { id, source } = identify(req);
       if (strictWxOnly() && source !== "wx") {

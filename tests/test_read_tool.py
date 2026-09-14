@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from docqa.read_tool import ReadTool
 
-root = Path(__file__).parent.parent / "docs"
+root = Path(__file__).parent.parent / "cloudrun" / "docs" / "molex"
 tool = ReadTool(root)
 fails = []
 
@@ -25,8 +25,8 @@ def check(name, fn, expect_ok=True):
 
 
 check("读取目录清单", lambda: tool.read("/"))
-check("读取 xlsx（自动转换）", lambda: tool.read("20260715光联正常班线路.xlsx", limit=15))
-check("分页读取 offset=5", lambda: tool.read("20260715光联正常班线路.xlsx", offset=5, limit=3))
+check("读取 xlsx（自动转换）", lambda: tool.read("bus-guanglian-zhengchang-20260715.xlsx", limit=15))
+check("分页读取 offset=5", lambda: tool.read("bus-guanglian-zhengchang-20260715.xlsx", offset=5, limit=3))
 check("文件不存在（预期返回错误信息）", lambda: tool.read("不存在.md"), expect_ok=False)
 check("拒绝绝对路径", lambda: tool.read("C:/Windows/win.ini"), expect_ok=False)
 check("拒绝目录穿越", lambda: tool.read("../pyproject.toml"), expect_ok=False)

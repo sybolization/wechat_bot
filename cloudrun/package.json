@@ -1,6 +1,6 @@
 {
   "name": "docqa-cloudrun",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "微信公众号知识库 agent（微信云托管部署版）",
   "main": "server.js",

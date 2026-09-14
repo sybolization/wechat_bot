@@ -33,27 +33,20 @@ foreach ($d in @("core", "channels", "webui")) {
 # 复制后删除 .keep 占位（webui 可能尚无页面文件，用 .keep 保证目录存在）
 Get-ChildItem $stage -Recurse -Force -Filter ".keep" | Remove-Item -Force
 
-# 知识库一：光联之家（项目根 docs/ 的中文文档 → ASCII 重命名，重建到 cloudrun/docs/guanglian，
-# 同时作为本地运行与打包阶段的统一来源）
+# 知识库一：光联之家（cloudrun/docs/guanglian 直接维护，ASCII 文件名）。
+# 两库共享的公共知识库目录（招聘、班车、敏感话题话术、特殊问题口径）
+# 权威副本维护在 cloudrun/docs/molex，每次打包整目录同步到 guanglian，保证一致。
 $guanglian = Join-Path $src "docs\guanglian"
-Remove-Item -Recurse -Force $guanglian -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $guanglian | Out-Null
-$map = @{
-    "20260715光联倒班上班车线路.xlsx"                       = "bus-daoban-shangban-20260715.xlsx"
-    "20260715光联倒班下班车线路.xlsx"                       = "bus-daoban-xiaban-20260715.xlsx"
-    "20260715光联正常班线路.xlsx"                           = "bus-guanglian-zhengchang-20260715.xlsx"
-    "20260715洪湾工厂班车线路.xlsx"                         = "bus-hongwan-factory-20260715.xlsx"
-    "珠海光联招聘操作员、储备干部、技术员、班组长、质检欢迎推荐！.md" = "zhaopin-shezhao-guanglian.md"
-    "2027莫仕珠海秋季校招  光联万物，智享未来！.md"               = "zhaopin-xiaozhao-2027-molex.md"
-    "代理商招聘广告 1.xlsx"                                  = "zhaopin-dailishang.xlsx"
-}
-foreach ($k in $map.Keys) {
-    Copy-Item (Join-Path $root "docs\$k") (Join-Path $guanglian $map[$k])
+$molexDocs = Join-Path $src "docs\molex"
+$sharedDirs = @("recruiting", "bus", "sensitive-guidelines", "special-qa")
+foreach ($d in $sharedDirs) {
+    Remove-Item (Join-Path $guanglian $d) -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $molexDocs $d) (Join-Path $guanglian $d) -Recurse
 }
 
 # 知识库二：molex（文档直接维护在 cloudrun/docs/molex，抓取时已用 ASCII 文件名）
-$molexLocal = Join-Path $src "docs\molex"
-New-Item -ItemType Directory -Force $molexLocal | Out-Null
+New-Item -ItemType Directory -Force $molexDocs | Out-Null
 
 # 部署 stage：只带当前 -KB 库的文档（文档隔离），排除 .keep 占位文件
 $docsStage = Join-Path $stage "docs"
