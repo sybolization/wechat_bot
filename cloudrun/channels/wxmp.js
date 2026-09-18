@@ -9,6 +9,8 @@
  *     完成后经客服消息接口（custom/send）推送答案；
  *     转人工诉求（消息命中关键词或 agent 输出兜底话术）自动关闭该用户 AI 并回电话指引
  *   - 停用模式（默认）→ 静默回 success，不调用 agent
+ * - 安全设施（WXMP_REQUIRE_WX_SOURCE=1 生效）：仅接受云托管内网通道推送（X-WX-SOURCE: wxmsg），
+ *   拒绝公网伪造 XML；openid 格式校验；蓝字点击内容白名单；AI 名单上限与写盘防抖；回答兜底超时
  * - 客服消息/typing 走云托管内网 api.weixin.qq.com 免 access_token
  *   （需在云托管控制台开启"开放接口服务"，并配置 custom/send、custom/typing 权限）
  */
@@ -24,6 +26,20 @@ const path = require("node:path");
 const WX_API = process.env.WX_API_BASE || "http://api.weixin.qq.com";
 const TYPING_RENEW_MS = 10e3;   // "输入中"状态约 15s 过期，每 10s 续发
 const ANSWER_MAX_BYTES = 2000;  // 客服消息 text 上限 2048 字节（UTF-8），留余量
+const ANSWER_TIMEOUT_MS = 180e3; // 兜底超时：模型/网络卡死也必须释放"处理中"状态与 typing
+
+// —— 安全设施（针对"开启AI模式"引入的攻击面）——
+// 1. 通道来源校验：微信云托管消息推送（内网通道）带 X-WX-SOURCE: wxmsg，公网伪造的 XML 无此头。
+//    开启后伪造推送无法冒充用户（滥用客服接口骚扰任意 openid / 污染 AI 名单 / 消耗模型额度）。
+//    与 webapi 的 STRICT_WX_ONLY 同一思路；本地联调需直发 XML 时设 WXMP_REQUIRE_WX_SOURCE=0。
+const REQUIRE_WX_SOURCE = /^(1|true|yes)$/i.test(process.env.WXMP_REQUIRE_WX_SOURCE || "");
+// 2. openid 合法性：微信 openid 为 [A-Za-z0-9_-] 组成、28 位左右；畸形值一律不响应，
+//    防止污染 ai-users.json / 会话历史 / 客服消息目标。
+const OPENID_RE = /^[\w-]{20,64}$/;
+// 3. AI 名单上限：极端情况下防 data/ai-users.json 无限膨胀
+const MAX_AI_USERS = 5000;
+// 4. 蓝字点击白名单：合法点击只会发送我们内嵌的菜单内容，bizmsgmenuid 必须为数字；
+//    否则按普通文本处理（不自动开启 AI），防伪造 bizmsgmenuid 夹带任意文案触发开启。
 
 // —— 蓝字菜单（weixin://bizmsgmenu）：点击后微信客户端以用户身份发送 msgmenucontent 文本 ——
 const AI_ON_CMD = "开启AI问答";
@@ -32,6 +48,7 @@ const SAMPLE_QUESTIONS = ["上下班有班车吗", "技术员的要求与薪资"
 const SAMPLE_LABELS = { "上下班有班车吗": "上下班有班车吗？", "技术员的要求与薪资": "技术员的要求与薪资", "吃饭有补贴吗": "吃饭有补贴吗？" };
 const menuLink = (content, label) =>
   `<a href="weixin://bizmsgmenu?msgmenucontent=${content}&msgmenuid=1">${label}</a>`;
+const MENU_CONTENTS = new Set([AI_ON_CMD, AI_OFF_CMD, ...SAMPLE_QUESTIONS]);
 
 function aiIntroText() {
   return "本号已接入 AI 问答，点击 " + menuLink(AI_ON_CMD, "开启 AI 问答") +
@@ -49,11 +66,29 @@ function aiGuideText() {
 const AI_USERS_FILE = path.join(__dirname, "..", "data", "ai-users.json");
 let aiUsers = new Set();
 try { aiUsers = new Set(JSON.parse(fs.readFileSync(AI_USERS_FILE, "utf8"))); } catch { /* 首次启动无文件 */ }
+// 防抖合并写盘：短时间反复开关只落盘一次（防刷开关命令造成高频磁盘写）
+let aiSaveTimer = null;
 function saveAiUsers() {
+  if (aiSaveTimer) return;
+  aiSaveTimer = setTimeout(() => { aiSaveTimer = null; doSaveAiUsers(); }, 500);
+  aiSaveTimer.unref?.();
+}
+function doSaveAiUsers() {
   try {
     fs.mkdirSync(path.dirname(AI_USERS_FILE), { recursive: true });
     fs.writeFileSync(AI_USERS_FILE, JSON.stringify([...aiUsers]), "utf8");
   } catch (e) { console.error("[wxmp] AI 开关持久化失败:", e.message); }
+}
+/** 开启指定用户的 AI（带名单上限）。返回 false 表示已达上限未开启。 */
+function addAiUser(openid) {
+  if (aiUsers.has(openid)) return true;
+  if (aiUsers.size >= MAX_AI_USERS) {
+    console.error("[wxmp] AI 开关名单已达上限，拒绝新增");
+    return false;
+  }
+  aiUsers.add(openid);
+  saveAiUsers();
+  return true;
 }
 
 // —— 关注欢迎图：docs/molex/reply-pic/welcome-reply.png 上传为永久素材后以图片回复 ——
@@ -118,13 +153,16 @@ function decodeXml(s) {
           .replace(/&apos;/g, "'").replace(/&amp;/g, "&");
 }
 
-function textReply(to, from, content) {
-  // CDATA 内只需防出现 ]]>；并过滤 XML 非法控制字符
-  const safe = String(content).replace(/\]\]>/g, "]]&gt;")
+/** CDATA 安全化：防出现 ]]>；并过滤 XML 非法控制字符（对用户名/消息内容统一处理）。 */
+function cdata(s) {
+  return String(s).replace(/\]\]>/g, "]]&gt;")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
-  return `<xml><ToUserName><![CDATA[${to}]]></ToUserName><FromUserName><![CDATA[${from}]]></FromUserName>` +
+}
+
+function textReply(to, from, content) {
+  return `<xml><ToUserName><![CDATA[${cdata(to)}]]></ToUserName><FromUserName><![CDATA[${cdata(from)}]]></FromUserName>` +
     `<CreateTime>${Math.floor(Date.now() / 1000)}</CreateTime>` +
-    `<MsgType><![CDATA[text]]></MsgType><Content><![CDATA[${safe}]]></Content></xml>`;
+    `<MsgType><![CDATA[text]]></MsgType><Content><![CDATA[${cdata(content)}]]></Content></xml>`;
 }
 
 /** 按字节上限截断（多字节字符从尾部逐字回退，保证不切半个字符）。 */
@@ -165,12 +203,18 @@ function startTyping(openid) {
   return () => { clearInterval(timer); cmd("CancelTyping"); };
 }
 
-/** 异步回答任务：跑 agent → 客服消息推送答案（带 AI 标识与免责声明）。 */
+/** 异步回答任务：跑 agent → 客服消息推送答案（带 AI 标识与免责声明）。带兜底超时，
+ *  保证卡死的回答最终也会释放 pending 状态并停掉 typing，不让单个用户被永久占住。 */
 function answerTask(openid, question) {
   const stopTyping = startTyping(openid);
   const label = (process.env.AI_LABEL || "【AI回复】").trim();
   const disclaimer = (process.env.AI_DISCLAIMER || "（内容由 AI 生成，具体招聘岗位及安排以官方最新发布为准）").trim();
-  runAgent(question, openid)
+  let timeoutId = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error("回答超时")), ANSWER_TIMEOUT_MS);
+    timeoutId.unref?.();
+  });
+  Promise.race([runAgent(question, openid), timeout])
     .then((answer) => {
       const replaced = applyHandoff(answer);
       if (replaced !== answer) {
@@ -189,10 +233,10 @@ function answerTask(openid, question) {
 }
 
 /**
- * 处理公众号消息推送（rawBody 为原始请求体）。
+ * 处理公众号消息推送（rawBody 为原始请求体；req 为 http.IncomingMessage，用于来源校验）。
  * 返回 { contentType, body } 供 server.js 直接写出（须在 5 秒内返回）。
  */
-function handleWxmp(rawBody) {
+function handleWxmp(rawBody, req = null) {
   const raw = String(rawBody || "");
 
   // 云托管控制台配置检测（JSON 的 action 字段或 XML 原文均可命中）
@@ -200,8 +244,20 @@ function handleWxmp(rawBody) {
     return { contentType: "text/plain", body: "success" };
   }
 
+  // 来源校验：仅接受微信云托管内网通道的消息推送（X-WX-SOURCE: wxmsg），公网伪造 XML 一律拒收。
+  // 拒收也回 success：不向探测者暴露任何行为差异。
+  if (REQUIRE_WX_SOURCE && req && req.headers?.["x-wx-source"] !== "wxmsg") {
+    console.error("[wxmp] 已拒收非微信来源的消息推送（缺少 X-WX-SOURCE: wxmsg 头）");
+    return { contentType: "text/plain", body: "success" };
+  }
+
   const msg = parseXml(raw);
   const from = msg.FromUserName;
+
+  // openid 合法性校验：畸形 openid 不响应、不入名单、不进 agent
+  if (!OPENID_RE.test(from)) {
+    return { contentType: "text/plain", body: "success" };
+  }
 
   // 关注事件 → 被动回复仅能带一条消息：欢迎语走被动回复（先到），欢迎图经客服接口紧随其后；
   // agent 模式再追加一条 AI 问答介绍（含蓝字菜单；关注动作客服额度 3 条/1 分钟，共 2 条够用）
@@ -229,25 +285,30 @@ function handleWxmp(rawBody) {
     // 开关命令（蓝字或手动输入）：即时被动回复确认，不计限流
     if (content === AI_ON_CMD || content === AI_OFF_CMD) {
       const on = content === AI_ON_CMD;
-      if (on) aiUsers.add(from); else aiUsers.delete(from);
-      saveAiUsers();
+      if (on) {
+        if (!addAiUser(from)) {
+          return { contentType: "application/xml", body: textReply(from, msg.ToUserName, "AI 问答开启人数已达上限，请稍后再试。") };
+        }
+      } else {
+        aiUsers.delete(from);
+        saveAiUsers();
+      }
       const tip = on
         ? `已开启 AI 问答，直接发送问题即可。\n不需要时可随时点 ${menuLink(AI_OFF_CMD, "关闭 AI 问答")}。`
         : `已关闭 AI 问答。需要时再点 ${menuLink(AI_ON_CMD, "开启 AI 问答")}。`;
       return { contentType: "application/xml", body: textReply(from, msg.ToUserName, tip) };
     }
 
-    // 蓝字菜单点击（XML 带 bizmsgmenuid）：未开启视为使用意图，自动开启后照常处理
-    // （关闭命令在上方开关分支已先行返回，不会走到这里）
-    if (msg.BizMsgMenuId && !aiUsers.has(from)) {
-      aiUsers.add(from);
-      saveAiUsers();
+    // 蓝字菜单点击（XML 带 bizmsgmenuid，仅数字合法，且内容命中已知菜单项）：
+    // 未开启视为使用意图，自动开启后照常处理。
+    // 关闭命令在上方开关分支已先行返回，不会走到这里
+    if (/^\d+$/.test(msg.BizMsgMenuId) && MENU_CONTENTS.has(content) && !aiUsers.has(from)) {
+      addAiUser(from);
     }
 
     // 手动输入样本问题：同样视为使用意图
     if (SAMPLE_QUESTIONS.includes(content) && !aiUsers.has(from)) {
-      aiUsers.add(from);
-      saveAiUsers();
+      addAiUser(from);
     }
 
     // 转人工诉求：未接入人工客服，直接回电话指引，不调用 agent（不占提问额度）；
@@ -273,7 +334,8 @@ function handleWxmp(rawBody) {
       return { contentType: "application/xml", body: textReply(from, msg.ToUserName, limited.message) };
     }
     pending.add(from);
-    answerTask(from, content);
+    // 长度钳制（与 agent 的 MAX_INPUT_LEN 一致）：防超长文本放大 token 消耗
+    answerTask(from, content.slice(0, 500));
     return { contentType: "application/xml", body: textReply(from, msg.ToUserName, "正在为您查询，请稍候…") };
   }
 

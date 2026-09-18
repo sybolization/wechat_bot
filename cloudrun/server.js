@@ -46,7 +46,7 @@ function route(req, res, raw) {
     if (urlPath === "/api" || urlPath.startsWith("/api/")) return handleWebApi(req, res, raw);
     // 公众号消息推送配置在根路径：XML 消息体，或云托管 CheckContainerPath 探测
     if (raw.includes("<xml>") || raw.includes("CheckContainerPath")) {
-      const out = handleWxmp(raw);
+      const out = handleWxmp(raw, req); // 传 req 供来源校验（X-WX-SOURCE）
       res.writeHead(200, { "Content-Type": out.contentType });
       return res.end(out.body);
     }
