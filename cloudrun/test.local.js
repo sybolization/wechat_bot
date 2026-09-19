@@ -133,6 +133,42 @@ async function waitServer() {
       assert.ok(t.includes("智能问答"), "应含引导文案: " + t);
     });
 
+    // ── 6b-6e. AI 开关：单按钮切换（文本 + CLICK 事件）与原命令回归 ──
+    // 注意：需 AGENT_MODE=on 才进入文本分支；openid 须符合 [\w-]{20,64}
+    const TOGGLE_OID = "otoggleuser0000000000000000001";
+    const postXml = (xml) => fetch(`${BASE}/`, { method: "POST", headers: { "Content-Type": "text/xml" }, body: xml });
+    const textXml = (content, createTime = "1700000000") =>
+      `<xml><ToUserName><![CDATA[gh_test]]></ToUserName><FromUserName><![CDATA[${TOGGLE_OID}]]></FromUserName>` +
+      `<CreateTime>${createTime}</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[${content}]]></Content></xml>`;
+    const clickXml = (eventKey) =>
+      `<xml><ToUserName><![CDATA[gh_test]]></ToUserName><FromUserName><![CDATA[${TOGGLE_OID}]]></FromUserName>` +
+      `<CreateTime>1700000099</CreateTime><MsgType><![CDATA[event]]></MsgType><Event><![CDATA[CLICK]]></Event>` +
+      `<EventKey><![CDATA[${eventKey}]]></EventKey></xml>`;
+
+    await testCase("AI 开关：文本 AI回复开关 → 已开启", async () => {
+      const r = await postXml(textXml("AI回复开关"));
+      const t = await r.text();
+      assert.ok(t.includes("已开启 AI 问答"), "应回复开启确认: " + t);
+    });
+
+    await testCase("AI 开关：再次发送 → 已关闭（toggle 取反）", async () => {
+      const r = await postXml(textXml("AI回复开关", "1700000001"));
+      const t = await r.text();
+      assert.ok(t.includes("已关闭 AI 问答"), "应回复关闭确认: " + t);
+    });
+
+    await testCase("AI 开关：CLICK 事件 EventKey=AI回复开关 → 已开启", async () => {
+      const r = await postXml(clickXml("AI回复开关"));
+      const t = await r.text();
+      assert.ok(t.includes("已开启 AI 问答"), "CLICK 事件应触发开启: " + t);
+    });
+
+    await testCase("AI 开关：原命令 关闭AI问答 不回归（并收尾关闭）", async () => {
+      const r = await postXml(textXml("关闭AI问答", "1700000002"));
+      const t = await r.text();
+      assert.ok(t.includes("已关闭 AI 问答"), "原关闭命令应正常: " + t);
+    });
+
     // ── 7. POST / CheckContainerPath → success ──
     await testCase("POST / CheckContainerPath → success", async () => {
       const r = await fetch(`${BASE}/`, {

@@ -5,6 +5,8 @@
  * - 文本私信：
  *   - agent 模式（AGENT_MODE=on）→ 每用户 AI 开关（默认关，data/ai-users.json 持久化）：
  *     蓝字菜单（weixin://bizmsgmenu，欢迎语/引导语内嵌）或手动发送"开启AI问答/关闭AI问答"切换；
+ *     单按钮切换命令"AI回复开关"（TOGGLE_CMDS，env AI_TOGGLE_CMD 可配）按当前状态取反，
+ *     手动输入文本与菜单 CLICK 事件（EventKey 命中）双入口均可触发；
  *     开启后秒回"正在查询"（规避微信 5 秒被动回复超时），异步跑 agent，
  *     完成后经客服消息接口（custom/send）推送答案；
  *     转人工诉求（消息命中关键词或 agent 输出兜底话术）自动关闭该用户 AI 并回电话指引
@@ -40,10 +42,17 @@ const OPENID_RE = /^[\w-]{20,64}$/;
 const MAX_AI_USERS = 5000;
 // 4. 蓝字点击白名单：合法点击只会发送我们内嵌的菜单内容，bizmsgmenuid 必须为数字；
 //    否则按普通文本处理（不自动开启 AI），防伪造 bizmsgmenuid 夹带任意文案触发开启。
+// 5. 日志 openid 掩码：排查日志不泄露完整用户标识
+const maskOpenid = (id) => (id && id.length > 8 ? id.slice(0, 4) + "****" + id.slice(-4) : "****");
 
 // —— 蓝字菜单（weixin://bizmsgmenu）：点击后微信客户端以用户身份发送 msgmenucontent 文本 ——
 const AI_ON_CMD = "开启AI问答";
 const AI_OFF_CMD = "关闭AI问答";
+// 单按钮切换命令：手动输入文本或菜单 CLICK 事件（EventKey）命中即按当前状态取反；
+// mp 后台"发送消息-文字"菜单内容与此一致即可（env AI_TOGGLE_CMD 逗号分隔可配多个）
+const TOGGLE_CMDS = new Set(
+  (process.env.AI_TOGGLE_CMD || "AI回复开关").split(",").map((s) => s.trim()).filter(Boolean)
+);
 const SAMPLE_QUESTIONS = ["上下班有班车吗", "技术员的要求与薪资", "吃饭有补贴吗"];
 const SAMPLE_LABELS = { "上下班有班车吗": "上下班有班车吗？", "技术员的要求与薪资": "技术员的要求与薪资", "吃饭有补贴吗": "吃饭有补贴吗？" };
 const menuLink = (content, label) =>
@@ -89,6 +98,23 @@ function addAiUser(openid) {
   aiUsers.add(openid);
   saveAiUsers();
   return true;
+}
+
+/** 单按钮切换：按当前状态取反，返回被动回复 XML。达上限时提示但不改变状态。 */
+function toggleReply(from, toUser) {
+  const on = !aiUsers.has(from);
+  let tip;
+  if (on && !addAiUser(from)) {
+    tip = "AI 问答开启人数已达上限，请稍后再试。";
+  } else if (on) {
+    tip = `已开启 AI 问答，直接发送问题即可。\n再次发送"AI回复开关"或点 ${menuLink(AI_OFF_CMD, "关闭 AI 问答")} 可关闭。`;
+  } else {
+    aiUsers.delete(from);
+    saveAiUsers();
+    tip = `已关闭 AI 问答。需要时再发送"AI回复开关"或点 ${menuLink(AI_ON_CMD, "开启 AI 问答")}。`;
+  }
+  console.log(`[wxmp] AI 开关切换 openid=${maskOpenid(from)} → ${on ? "ON" : "OFF"}`);
+  return { contentType: "application/xml", body: textReply(from, toUser, tip) };
 }
 
 // —— 关注欢迎图：docs/molex/reply-pic/welcome-reply.png 上传为永久素材后以图片回复 ——
@@ -144,6 +170,7 @@ function parseXml(xml) {
     Content: pick("Content"),
     MsgId: pick("MsgId"),
     Event: pick("Event"),
+    EventKey: pick("EventKey"), // 菜单 CLICK 事件的按钮 key
     BizMsgMenuId: pick("bizmsgmenuid"), // 蓝字菜单（bizmsgmenu）点击后推送附带此字段，普通手动输入没有
   };
 }
@@ -259,6 +286,9 @@ function handleWxmp(rawBody, req = null) {
     return { contentType: "text/plain", body: "success" };
   }
 
+  // 入口日志（openid 掩码）：云托管排查全靠它，正常路径也必须有迹可循
+  console.log(`[wxmp] 收到推送 type=${msg.MsgType} event=${msg.Event || ""} content=${(msg.Content || "").slice(0, 20)} openid=${maskOpenid(from)}`);
+
   // 关注事件 → 被动回复仅能带一条消息：欢迎语走被动回复（先到），欢迎图经客服接口紧随其后；
   // agent 模式再追加一条 AI 问答介绍（含蓝字菜单；关注动作客服额度 3 条/1 分钟，共 2 条够用）
   if (msg.MsgType === "event" && msg.Event === "subscribe") {
@@ -274,6 +304,14 @@ function handleWxmp(rawBody, req = null) {
     return { contentType: "application/xml", body: textReply(from, msg.ToUserName, welcome) };
   }
 
+  // 菜单点击事件（click 类型按钮推送）：EventKey 命中切换命令时 toggle 开关；
+  // 其余菜单点击一律静默回 success（不重试、无副作用）
+  if (msg.MsgType === "event" && msg.Event === "CLICK") {
+    const key = (msg.EventKey || "").trim();
+    if (TOGGLE_CMDS.has(key) || key === "ai_toggle") return toggleReply(from, msg.ToUserName);
+    return { contentType: "text/plain", body: "success" };
+  }
+
   // 文本私信 → agent 模式走 AI 问答（每用户开关，默认关，蓝字开启）；停用模式静默回 success
   if (msg.MsgType === "text" && from && msg.Content && AGENT_ENABLED) {
     if (msg.MsgId) {
@@ -281,6 +319,9 @@ function handleWxmp(rawBody, req = null) {
       seenMsg.set(msg.MsgId, Date.now());
     }
     const content = msg.Content.trim();
+
+    // 单按钮切换（手动输入或后台菜单下发文字的回复文本）：按当前状态取反，不计限流
+    if (TOGGLE_CMDS.has(content)) return toggleReply(from, msg.ToUserName);
 
     // 开关命令（蓝字或手动输入）：即时被动回复确认，不计限流
     if (content === AI_ON_CMD || content === AI_OFF_CMD) {
